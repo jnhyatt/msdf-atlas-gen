@@ -297,7 +297,6 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="msdf-atlas-gen\artery-font-export.cpp" />
     <ClCompile Include="msdf-atlas-gen\bitmap-blit.cpp" />
     <ClCompile Include="msdf-atlas-gen\charset-parser.cpp" />
     <ClCompile Include="msdf-atlas-gen\Charset.cpp" />
@@ -316,7 +315,6 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h" />
-    <ClInclude Include="msdf-atlas-gen\artery-font-export.h" />
     <ClInclude Include="msdf-atlas-gen\AtlasGenerator.h" />
     <ClInclude Include="msdf-atlas-gen\AtlasStorage.h" />
     <ClInclude Include="msdf-atlas-gen\bitmap-blit.h" />
