@@ -146,7 +146,6 @@ struct Configuration {
     unsigned long long coloringSeed;
     GeneratorAttributes generatorAttributes;
     int threadCount;
-    const char *arteryFontFilename;
     const char *imageFilename;
     const char *jsonFilename;
     const char *csvFilename;
@@ -170,15 +169,6 @@ static bool makeAtlas(const std::vector<GlyphGeometry> &glyphs, msdfgen::FontHan
         else {
             success = false;
             puts("Failed to save the atlas as an image file.");
-        }
-    }
-
-    if (config.arteryFontFilename) {
-        if (exportArteryFont<float>(font, glyphs.data(), glyphs.size(), config.emSize, config.pxRange, bitmap, config.imageType, config.imageFormat, config.arteryFontFilename))
-            puts("Artery Font file generated.");
-        else {
-            success = false;
-            puts("Failed to generate Artery Font file.");
         }
     }
 
@@ -269,11 +259,6 @@ int main(int argc, const char * const *argv) {
         }
         ARG_CASE("-charset", 1) {
             charsetFilename = argv[++argPos];
-            ++argPos;
-            continue;
-        }
-        ARG_CASE("-arfont", 1) {
-            config.arteryFontFilename = argv[++argPos];
             ++argPos;
             continue;
         }
@@ -440,11 +425,11 @@ int main(int argc, const char * const *argv) {
     }
     if (!fontFilename)
         ABORT("No font specified.");
-    if (!(config.arteryFontFilename || config.imageFilename || config.jsonFilename || config.csvFilename || config.shadronPreviewFilename)) {
+    if (!(config.imageFilename || config.jsonFilename || config.csvFilename || config.shadronPreviewFilename)) {
         puts("No output specified.");
         return 0;
     }
-    bool layoutOnly = !(config.arteryFontFilename || config.imageFilename);
+    bool layoutOnly = !(config.imageFilename);
 
     // Fix up configuration based on related values
     if (!(config.imageType == ImageType::PSDF || config.imageType == ImageType::MSDF || config.imageType == ImageType::MTSDF))
@@ -476,19 +461,18 @@ int main(int argc, const char * const *argv) {
         config.imageFormat = ImageFormat::PNG;
         imageFormatName = "png";
         // If image format is not specified and -imageout is the only image output, infer format from its extension
-        if (imageExtension != ImageFormat::UNSPECIFIED && !config.arteryFontFilename)
+        if (imageExtension != ImageFormat::UNSPECIFIED)
             config.imageFormat = imageExtension;
     }
     if (config.imageType == ImageType::MTSDF && config.imageFormat == ImageFormat::BMP)
         ABORT("Atlas type not compatible with image format. MTSDF requires a format with alpha channel.");
-    if (config.arteryFontFilename && !(config.imageFormat == ImageFormat::PNG || config.imageFormat == ImageFormat::BINARY || config.imageFormat == ImageFormat::BINARY_FLOAT)) {
-        config.arteryFontFilename = nullptr;
+    if (!(config.imageFormat == ImageFormat::PNG || config.imageFormat == ImageFormat::BINARY || config.imageFormat == ImageFormat::BINARY_FLOAT)) {
         result = 1;
         puts("Error: Unable to create an Artery Font file with the specified image format!");
         // Recheck whether there is anything else to do
-        if (!(config.arteryFontFilename || config.imageFilename || config.jsonFilename || config.csvFilename || config.shadronPreviewFilename))
+        if (!(config.imageFilename || config.jsonFilename || config.csvFilename || config.shadronPreviewFilename))
             return result;
-        layoutOnly = !(config.arteryFontFilename || config.imageFilename);
+        layoutOnly = !(config.imageFilename);
     }
     if (imageExtension != ImageFormat::UNSPECIFIED) {
         // Warn if image format mismatches -imageout extension
