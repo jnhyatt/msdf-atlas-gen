@@ -2,31 +2,45 @@
 #include "GlyphGeometry.h"
 
 #include <cmath>
+#include <core/ShapeDistanceFinder.h>
 
 namespace msdf_atlas {
 
-GlyphGeometry::GlyphGeometry() : codepoint(), bounds(), reverseWinding(), advance(), box() { }
+GlyphGeometry::GlyphGeometry() : index(), codepoint(), bounds(), advance(), box() { }
 
-double GlyphGeometry::simpleSignedDistance(const msdfgen::Point2 &p) const {
-    double dummy;
-    msdfgen::SignedDistance minDistance;
-    for (const msdfgen::Contour &contour : shape.contours)
-        for (const msdfgen::EdgeHolder &edge : contour.edges) {
-            msdfgen::SignedDistance distance = edge->signedDistance(p, dummy);
-            if (distance < minDistance)
-                minDistance = distance;
-        }
-    return minDistance.distance;
-}
-
-bool GlyphGeometry::load(msdfgen::FontHandle *font, unicode_t codepoint) {
-    if (font && msdfgen::loadGlyph(shape, font, codepoint, &advance) && shape.validate()) {
-        this->codepoint = codepoint;
+bool GlyphGeometry::load(msdfgen::FontHandle *font, msdfgen::GlyphIndex index, bool preprocessGeometry) {
+    if (font && msdfgen::loadGlyph(shape, font, index, &advance) && shape.validate()) {
+        this->index = index.getIndex();
+        codepoint = 0;
+        #ifdef MSDFGEN_USE_SKIA
+            if (preprocessGeometry)
+                msdfgen::resolveShapeGeometry(shape);
+        #endif
         shape.normalize();
         bounds = shape.getBounds();
-        msdfgen::Point2 outerPoint(bounds.l-(bounds.r-bounds.l)-1, bounds.b-(bounds.t-bounds.b)-1);
-        reverseWinding = simpleSignedDistance(outerPoint) > 0;
+        #ifdef MSDFGEN_USE_SKIA
+            if (!preprocessGeometry)
+        #endif
+        {
+            // Determine if shape is winded incorrectly and reverse it in that case
+            msdfgen::Point2 outerPoint(bounds.l-(bounds.r-bounds.l)-1, bounds.b-(bounds.t-bounds.b)-1);
+            if (msdfgen::SimpleTrueShapeDistanceFinder::oneShotDistance(shape, outerPoint) > 0) {
+                for (msdfgen::Contour &contour : shape.contours)
+                    contour.reverse();
+            }
+        }
         return true;
+    }
+    return false;
+}
+
+bool GlyphGeometry::load(msdfgen::FontHandle *font, unicode_t codepoint, bool preprocessGeometry) {
+    msdfgen::GlyphIndex index;
+    if (msdfgen::getGlyphIndex(index, font, codepoint)) {
+        if (load(font, index, preprocessGeometry)) {
+            this->codepoint = codepoint;
+            return true;
+        }
     }
     return false;
 }
@@ -43,7 +57,7 @@ void GlyphGeometry::wrapBox(double scale, double range, double miterLimit) {
         l -= .5*range, b -= .5*range;
         r += .5*range, t += .5*range;
         if (miterLimit > 0)
-            shape.boundMiters(l, b, r, t, .5*range, miterLimit, reverseWinding ? -1 : +1);
+            shape.boundMiters(l, b, r, t, .5*range, miterLimit, 1);
         double w = scale*(r-l);
         double h = scale*(t-b);
         box.rect.w = (int) ceil(w)+1;
@@ -60,8 +74,26 @@ void GlyphGeometry::placeBox(int x, int y) {
     box.rect.x = x, box.rect.y = y;
 }
 
+int GlyphGeometry::getIndex() const {
+    return index;
+}
+
+msdfgen::GlyphIndex GlyphGeometry::getGlyphIndex() const {
+    return msdfgen::GlyphIndex(index);
+}
+
 unicode_t GlyphGeometry::getCodepoint() const {
     return codepoint;
+}
+
+int GlyphGeometry::getIdentifier(GlyphIdentifierType type) const {
+    switch (type) {
+        case GlyphIdentifierType::GLYPH_INDEX:
+            return index;
+        case GlyphIdentifierType::UNICODE_CODEPOINT:
+            return (int) codepoint;
+    }
+    return 0;
 }
 
 const msdfgen::Shape & GlyphGeometry::getShape() const {
@@ -70,10 +102,6 @@ const msdfgen::Shape & GlyphGeometry::getShape() const {
 
 double GlyphGeometry::getAdvance() const {
     return advance;
-}
-
-bool GlyphGeometry::isWindingReverse() const {
-    return reverseWinding;
 }
 
 void GlyphGeometry::getBoxRect(int &x, int &y, int &w, int &h) const {
@@ -123,7 +151,7 @@ bool GlyphGeometry::isWhitespace() const {
 
 GlyphGeometry::operator GlyphBox() const {
     GlyphBox box;
-    box.codepoint = codepoint;
+    box.index = index;
     box.advance = advance;
     getQuadPlaneBounds(box.bounds.l, box.bounds.b, box.bounds.r, box.bounds.t);
     box.rect.x = this->box.rect.x, box.rect.y = this->box.rect.y, box.rect.w = this->box.rect.w, box.rect.h = this->box.rect.h;

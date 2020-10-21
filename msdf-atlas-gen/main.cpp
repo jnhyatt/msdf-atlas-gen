@@ -1,6 +1,6 @@
 
 /*
-* MULTI-CHANNEL SIGNED DISTANCE FIELD ATLAS GENERATOR v1.0 (2020-03-08) - standalone console program
+* MULTI-CHANNEL SIGNED DISTANCE FIELD ATLAS GENERATOR v1.1 (2020-10-18) - standalone console program
 * --------------------------------------------------------------------------------------------------
 * A utility by Viktor Chlumsky, (c) 2020
 *
@@ -27,15 +27,25 @@ using namespace msdf_atlas;
 #define GLYPH_FILL_RULE msdfgen::FILL_NONZERO
 #define MCG_MULTIPLIER 6364136223846793005ull
 
+#ifdef MSDFGEN_USE_SKIA
+    #define TITLE_SUFFIX    " & Skia"
+    #define EXTRA_UNDERLINE "-------"
+#else
+    #define TITLE_SUFFIX
+    #define EXTRA_UNDERLINE
+#endif
+
 static const char * const helpText = R"(
-MSDF Atlas Generator by Viktor Chlumsky v)" MSDF_ATLAS_VERSION R"( (with MSDFGEN v)" MSDFGEN_VERSION R"()
-----------------------------------------------------------------
+MSDF Atlas Generator by Viktor Chlumsky v)" MSDF_ATLAS_VERSION R"( (with MSDFGEN v)" MSDFGEN_VERSION TITLE_SUFFIX R"()
+----------------------------------------------------------------)" EXTRA_UNDERLINE R"(
 
 INPUT SPECIFICATION
   -font <filename.ttf/otf>
       Specifies the input TrueType / OpenType font file. This is required.
   -charset <filename>
       Specifies the input character set. Refer to the documentation for format of charset specification. Defaults to ASCII.
+  -glyphset <filename>
+      Specifies the set of input glyphs as glyph indices within the font file.
 
 ATLAS CONFIGURATION
   -type <hardmask / softmask / sdf / psdf / msdf / mtsdf>
@@ -76,13 +86,27 @@ DISTANCE FIELD GENERATOR SETTINGS
   -errorcorrection <threshold>
       Changes the threshold used to detect and correct potential artifacts. 0 disables error correction. (msdf / mtsdf only)
   -miterlimit <value>
-      Sets the miter limit that limits the extension of each glyph's bounding box due to very sharp corners. (psdf / msdf / mtsdf only)
+      Sets the miter limit that limits the extension of each glyph's bounding box due to very sharp corners. (psdf / msdf / mtsdf only))"
+#ifdef MSDFGEN_USE_SKIA
+R"(
+  -overlap
+      Switches to distance field generator with support for overlapping contours.
+  -nopreprocess
+      Disables path preprocessing which resolves self-intersections and overlapping contours.
+  -scanline
+      Performs an additional scanline pass to fix the signs of the distances.)"
+#else
+R"(
   -nooverlap
       Disables resolution of overlapping contours.
   -noscanline
-      Disables the scanline pass, which corrects the distance field's signs according to the non-zero fill rule.
+      Disables the scanline pass, which corrects the distance field's signs according to the non-zero fill rule.)"
+#endif
+R"(
   -seed <N>
       Sets the initial seed for the edge coloring heuristic.
+  -threads <N>
+      Sets the number of threads for the parallel computation. (0 = auto)
 )";
 
 static char toupper(char c) {
@@ -123,12 +147,24 @@ static bool cmpExtension(const char *path, const char *ext) {
     return true;
 }
 
-static void loadGlyphs(std::vector<GlyphGeometry> &glyphs, msdfgen::FontHandle *font, const Charset &charset) {
+static void loadGlyphsByIndex(std::vector<GlyphGeometry> &glyphs, msdfgen::FontHandle *font, const Charset &charset, bool preprocessGeometry) {
     glyphs.clear();
     glyphs.reserve(charset.size());
     for (unicode_t cp : charset) {
         GlyphGeometry glyph;
-        if (glyph.load(font, cp))
+        if (glyph.load(font, msdfgen::GlyphIndex(cp), preprocessGeometry))
+            glyphs.push_back((GlyphGeometry &&) glyph);
+        else
+            printf("Glyph # 0x%X missing\n", cp);
+    }
+}
+
+static void loadGlyphsByUnicode(std::vector<GlyphGeometry> &glyphs, msdfgen::FontHandle *font, const Charset &charset, bool preprocessGeometry) {
+    glyphs.clear();
+    glyphs.reserve(charset.size());
+    for (unicode_t cp : charset) {
+        GlyphGeometry glyph;
+        if (glyph.load(font, cp, preprocessGeometry))
             glyphs.push_back((GlyphGeometry &&) glyph);
         else
             printf("Glyph for codepoint 0x%X missing\n", cp);
@@ -136,6 +172,7 @@ static void loadGlyphs(std::vector<GlyphGeometry> &glyphs, msdfgen::FontHandle *
 }
 
 struct Configuration {
+    GlyphIdentifierType glyphIdentifierType;
     ImageType imageType;
     ImageFormat imageFormat;
     int width, height;
@@ -145,6 +182,7 @@ struct Configuration {
     double miterLimit;
     unsigned long long coloringSeed;
     GeneratorAttributes generatorAttributes;
+    bool preprocessGeometry;
     int threadCount;
     const char *imageFilename;
     const char *jsonFilename;
@@ -182,12 +220,20 @@ int main(int argc, const char * const *argv) {
     Configuration config = { };
     const char *fontFilename = nullptr;
     const char *charsetFilename = nullptr;
+    config.glyphIdentifierType = GlyphIdentifierType::UNICODE_CODEPOINT;
     config.imageType = ImageType::MSDF;
     config.imageFormat = ImageFormat::UNSPECIFIED;
     const char *imageFormatName = nullptr;
     int fixedWidth = -1, fixedHeight = -1;
-    config.generatorAttributes.overlapSupport = true;
-    config.generatorAttributes.scanlinePass = true;
+    config.preprocessGeometry = (
+        #ifdef MSDFGEN_USE_SKIA
+            true
+        #else
+            false
+        #endif
+    );
+    config.generatorAttributes.overlapSupport = !config.preprocessGeometry;
+    config.generatorAttributes.scanlinePass = !config.preprocessGeometry;
     config.generatorAttributes.errorCorrectionThreshold = MSDFGEN_DEFAULT_ERROR_CORRECTION_THRESHOLD;
     double minEmSize = 0;
     enum {
@@ -200,7 +246,7 @@ int main(int argc, const char * const *argv) {
     TightAtlasPacker::DimensionsConstraint atlasSizeConstraint = TightAtlasPacker::DimensionsConstraint::MULTIPLE_OF_FOUR_SQUARE;
     config.angleThreshold = DEFAULT_ANGLE_THRESHOLD;
     config.miterLimit = DEFAULT_MITER_LIMIT;
-    config.threadCount = std::max((int) std::thread::hardware_concurrency(), 1);
+    config.threadCount = 0;
 
     // Parse command line
     int argPos = 1;
@@ -259,6 +305,13 @@ int main(int argc, const char * const *argv) {
         }
         ARG_CASE("-charset", 1) {
             charsetFilename = argv[++argPos];
+            config.glyphIdentifierType = GlyphIdentifierType::UNICODE_CODEPOINT;
+            ++argPos;
+            continue;
+        }
+        ARG_CASE("-glyphset", 1) {
+            charsetFilename = argv[++argPos];
+            config.glyphIdentifierType = GlyphIdentifierType::GLYPH_INDEX;
             ++argPos;
             continue;
         }
@@ -379,8 +432,23 @@ int main(int argc, const char * const *argv) {
             ++argPos;
             continue;
         }
+        ARG_CASE("-nopreprocess", 0) {
+            config.preprocessGeometry = false;
+            argPos += 1;
+            continue;
+        }
+        ARG_CASE("-preprocess", 0) {
+            config.preprocessGeometry = true;
+            argPos += 1;
+            continue;
+        }
         ARG_CASE("-nooverlap", 0) {
             config.generatorAttributes.overlapSupport = false;
+            argPos += 1;
+            continue;
+        }
+        ARG_CASE("-overlap", 0) {
+            config.generatorAttributes.overlapSupport = true;
             argPos += 1;
             continue;
         }
@@ -397,6 +465,14 @@ int main(int argc, const char * const *argv) {
         ARG_CASE("-seed", 1) {
             if (!parseUnsignedLL(config.coloringSeed, argv[argPos+1]))
                 ABORT("Invalid seed. Use -seed <N> with N being a non-negative integer.");
+            argPos += 2;
+            continue;
+        }
+        ARG_CASE("-threads", 1) {
+            unsigned tc;
+            if (!parseUnsigned(tc, argv[argPos+1]) || (int) tc < 0)
+                ABORT("Invalid thread count. Use -threads <N> with N being a non-negative integer.");
+            config.threadCount = (int) tc;
             argPos += 2;
             continue;
         }
@@ -447,6 +523,8 @@ int main(int argc, const char * const *argv) {
         rangeMode = RANGE_PIXEL;
         rangeValue = DEFAULT_PIXEL_RANGE;
     }
+    if (config.threadCount <= 0)
+        config.threadCount = std::max((int) std::thread::hardware_concurrency(), 1);
 
     // Finalize image format
     ImageFormat imageExtension = ImageFormat::UNSPECIFIED;
@@ -522,17 +600,24 @@ int main(int argc, const char * const *argv) {
     // Load character set
     Charset charset;
     if (charsetFilename) {
-        if (!charset.load(charsetFilename))
-            ABORT("Failed to load character set specification.");
+        if (!charset.load(charsetFilename, config.glyphIdentifierType != GlyphIdentifierType::UNICODE_CODEPOINT))
+            ABORT(config.glyphIdentifierType == GlyphIdentifierType::GLYPH_INDEX ? "Failed to load glyph set specification." : "Failed to load character set specification.");
     } else
         charset = Charset::ASCII;
-    if (charset.empty())
-        ABORT("No character set loaded.");
 
     // Load glyphs
     std::vector<GlyphGeometry> glyphs;
-    loadGlyphs(glyphs, font, charset);
-    printf("Loaded geometry of %d out of %d characters.\n", (int) glyphs.size(), (int) charset.size());
+    switch (config.glyphIdentifierType) {
+        case GlyphIdentifierType::GLYPH_INDEX:
+            loadGlyphsByIndex(glyphs, font, charset, config.preprocessGeometry);
+            break;
+        case GlyphIdentifierType::UNICODE_CODEPOINT:
+            loadGlyphsByUnicode(glyphs, font, charset, config.preprocessGeometry);
+            break;
+    }
+    if (glyphs.empty())
+        ABORT("No glyphs loaded.");
+    printf("Loaded geometry of %d out of %d %s.\n", (int) glyphs.size(), (int) charset.size(), config.glyphIdentifierType == GlyphIdentifierType::GLYPH_INDEX ? "glyphs" : "characters");
 
     // Determine final atlas dimensions, scale and range, pack glyphs
     {
@@ -638,7 +723,7 @@ int main(int argc, const char * const *argv) {
     }
 
     if (config.csvFilename) {
-        if (exportCSV(glyphs.data(), glyphs.size(), fontMetrics.emSize, config.csvFilename))
+        if (exportCSV(glyphs.data(), glyphs.size(), config.glyphIdentifierType, fontMetrics.emSize, config.csvFilename))
             puts("Glyph layout written into CSV file.");
         else {
             result = 1;
@@ -646,7 +731,7 @@ int main(int argc, const char * const *argv) {
         }
     }
     if (config.jsonFilename) {
-        if (exportJSON(font, glyphs.data(), glyphs.size(), config.emSize, config.pxRange, config.width, config.height, config.imageType, config.jsonFilename))
+        if (exportJSON(font, glyphs.data(), glyphs.size(), config.glyphIdentifierType, config.emSize, config.pxRange, config.width, config.height, config.imageType, config.jsonFilename))
             puts("Glyph layout and metadata written into JSON file.");
         else {
             result = 1;
@@ -655,14 +740,19 @@ int main(int argc, const char * const *argv) {
     }
 
     if (config.shadronPreviewFilename && config.shadronPreviewText) {
-        std::vector<unicode_t> previewText;
-        utf8Decode(previewText, config.shadronPreviewText);
-        previewText.push_back(0);
-        if (generateShadronPreview(font, glyphs.data(), glyphs.size(), config.imageType, config.width, config.height, config.pxRange, previewText.data(), config.imageFilename, config.shadronPreviewFilename))
-            puts("Shadron preview script generated.");
-        else {
+        if (config.glyphIdentifierType == GlyphIdentifierType::UNICODE_CODEPOINT) {
+            std::vector<unicode_t> previewText;
+            utf8Decode(previewText, config.shadronPreviewText);
+            previewText.push_back(0);
+            if (generateShadronPreview(font, glyphs.data(), glyphs.size(), config.imageType, config.width, config.height, config.pxRange, previewText.data(), config.imageFilename, config.shadronPreviewFilename))
+                puts("Shadron preview script generated.");
+            else {
+                result = 1;
+                puts("Failed to generate Shadron preview file.");
+            }
+        } else {
             result = 1;
-            puts("Failed to generate Shadron preview file.");
+            puts("Shadron preview not supported in -glyphset mode.");
         }
     }
 

@@ -14,21 +14,26 @@ class GlyphGeometry {
 public:
     GlyphGeometry();
     /// Loads glyph geometry from font
-    bool load(msdfgen::FontHandle *font, unicode_t codepoint);
+    bool load(msdfgen::FontHandle *font, msdfgen::GlyphIndex index, bool preprocessGeometry = true);
+    bool load(msdfgen::FontHandle *font, unicode_t codepoint, bool preprocessGeometry = true);
     /// Applies edge coloring to glyph shape
     void edgeColoring(double angleThreshold, unsigned long long seed);
     /// Computes the dimensions of the glyph's box as well as the transformation for the generator function
     void wrapBox(double scale, double range, double miterLimit);
     /// Sets the glyph's box's position in the atlas
     void placeBox(int x, int y);
-    /// Returns the glyph's Unicode index
+    /// Returns the glyph's index within the font
+    int getIndex() const;
+    /// Returns the glyph's index as a msdfgen::GlyphIndex
+    msdfgen::GlyphIndex getGlyphIndex() const;
+    /// Returns the Unicode codepoint represented by the glyph or 0 if unknown
     unicode_t getCodepoint() const;
+    /// Returns the glyph's identifier specified by the supplied identifier type
+    int getIdentifier(GlyphIdentifierType type) const;
     /// Returns the glyph's shape
     const msdfgen::Shape & getShape() const;
     /// Returns the glyph's advance
     double getAdvance() const;
-    /// Returns true if the shape has reverse winding
-    bool isWindingReverse() const;
     /// Outputs the position and dimensions of the glyph's box in the atlas
     void getBoxRect(int &x, int &y, int &w, int &h) const;
     /// Outputs the dimensions of the glyph's box in the atlas
@@ -49,10 +54,10 @@ public:
     operator GlyphBox() const;
 
 private:
+    int index;
     unicode_t codepoint;
     msdfgen::Shape shape;
     msdfgen::Shape::Bounds bounds;
-    bool reverseWinding;
     double advance;
     struct {
         struct {
@@ -62,9 +67,6 @@ private:
         double scale;
         msdfgen::Vector2 translate;
     } box;
-
-    /// Computes the signed distance from point p in a naive way
-    double simpleSignedDistance(const msdfgen::Point2 &p) const;
 
 };
 
